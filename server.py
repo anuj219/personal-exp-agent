@@ -8,10 +8,53 @@ import sqlite3
 
 from mcp.server.fastmcp import FastMCP
 
+import os
+from uuid import UUID
+from dotenv import load_dotenv
+from supabase import create_client, Client
+
 mcp = FastMCP("Personal Expense Agent")
 
 DB_PATH = "expenses.db"
 
+# ----------- SUPABASE CONFIGS -----------------------
+# Load environment variables from .env
+load_dotenv()
+
+# Supabase configuration
+SUPABASE_URL = os.getenv("SUPABASE_PROJECT_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SECRET_KEY")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError("Supabase environment variables are missing.")
+
+# Create one Supabase client for this MCP server process
+supabase: Client = create_client(
+    SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY
+)
+
+
+def get_current_user_id() -> str:
+    """
+    Get the authenticated user's UUID from the environment.
+
+    This value is injected by our FastAPI backend.
+    It is never supplied by the LLM.
+    """
+    user_id = os.getenv("EXPENSE_USER_ID")
+
+    if not user_id:
+        raise RuntimeError(
+            "EXPENSE_USER_ID is missing. "
+            "The MCP server must be started by the authenticated backend."
+        )
+
+    try:
+        return str(UUID(user_id))
+    except ValueError:
+        raise RuntimeError("EXPENSE_USER_ID is not a valid UUID.")
+# -----------
 
 EXPENSE_CATEGORIES = [
     "Food",
@@ -159,8 +202,8 @@ def add_transaction(
     category: str,
     subcategory: str = "",
     note: str = "",
-    occurred_on: str = "",
-) -> dict:
+    occurred_on: str = ""
+) -> str:
     """Record one expense or income transaction.
 
     Args:
@@ -172,57 +215,64 @@ def add_transaction(
         note: Optional description.
         occurred_on: Optional transaction date in YYYY-MM-DD format.
     """
-    transaction_type = transaction_type.strip().lower()
-    payment_method = payment_method.strip().lower()
 
-    if transaction_type not in {"expense", "income"}:
-        raise ValueError("transaction_type must be 'expense' or 'income'.")
-    category = validate_category(transaction_type, category)
+    try:
+        # Validate transaction type
+        transaction_type = transaction_type.strip().lower()
 
-    if payment_method not in {"cash", "upi", "card", "bank", "other"}:
-        raise ValueError("Unsupported payment method.")
+        if transaction_type not in ["expense", "income"]:
+            return "Error: transaction_type must be 'expense' or 'income'."
 
-    if not category:
-        raise ValueError("Category cannot be empty.")
+        # Validate payment method
+        payment_method = payment_method.strip().lower()
 
-    amount_paise = rupees_to_paise(amount_rupees)
-    transaction_date = validate_date(occurred_on)
+        if payment_method not in PAYMENT_METHODS:
+            return f"Error: Invalid payment method. Allowed: {PAYMENT_METHODS}"
 
-    with get_connection() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO transactions (
-                amount_paise, transaction_type, payment_method,
-                category, subcategory, note, occurred_on
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                amount_paise,
-                transaction_type,
-                payment_method,
-                category,
-                subcategory.strip(),
-                note.strip(),
-                transaction_date,
-            ),
-        )
-        transaction_id = cursor.lastrowid
+        # Validate category
+        category = validate_category(transaction_type, category)
 
-    return {
-        "success": True,
-        "message": f"{transaction_type.title()} recorded successfully.",
-        "transaction": {
-            "id": transaction_id,
-            "amount_rupees": f"{amount_paise / 100:.2f}",
+        # Convert rupees into paise
+        amount_paise = rupees_to_paise(amount_rupees)
+
+        # Validate date
+        occurred_on = validate_date(occurred_on)
+
+        # Get trusted user identity
+        user_id = get_current_user_id()
+
+        # Prepare cloud database record
+        transaction = {
+            "user_id": user_id,
+            "amount_paise": amount_paise,
             "transaction_type": transaction_type,
             "payment_method": payment_method,
             "category": category,
-            "subcategory": subcategory.strip(),
-            "note": note.strip(),
-            "occurred_on": transaction_date,
-        },
-    }
+            "subcategory": subcategory.strip() or None,
+            "note": note.strip() or None,
+            "occurred_on": occurred_on,
+        }
+
+        # Insert into Supabase
+        response = (
+            supabase.table("transactions")
+            .insert(transaction)
+            .execute()
+        )
+
+        if not response.data:
+            return "Error: Transaction could not be saved."
+
+        saved_transaction = response.data[0]
+
+        return (
+            f"Successfully added {transaction_type} of "
+            f"₹{amount_rupees:.2f}. "
+            f"Transaction ID: {saved_transaction['id']}"
+        )
+
+    except Exception as e:
+        return f"Error adding transaction: {str(e)}"
 
 
 @mcp.tool()
@@ -243,39 +293,41 @@ def list_transactions(
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100.")
 
-    conditions = []
-    params = []
-
     if start_date:
-        conditions.append("occurred_on >= ?")
-        params.append(validate_date(start_date))
+        start_date = validate_date(start_date)
 
     if end_date:
-        conditions.append("occurred_on <= ?")
-        params.append(validate_date(end_date))
+        end_date = validate_date(end_date)
 
     if start_date and end_date and start_date > end_date:
         raise ValueError("start_date cannot be after end_date.")
 
-    if category.strip():
-        conditions.append("category = ?")
-        params.append(category.strip().lower())
+    user_id = get_current_user_id()
 
-    where_clause = (
-        "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = (
+        supabase.table("transactions")
+        .select("*")
+        .eq("user_id", user_id)
     )
 
-    with get_connection() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT *
-            FROM transactions
-            {where_clause}
-            ORDER BY occurred_on DESC, id DESC
-            LIMIT ?
-            """,
-            (*params, limit),
-        ).fetchall()
+    if start_date:
+        query = query.gte("occurred_on", start_date)
+
+    if end_date:
+        query = query.lte("occurred_on", end_date)
+
+    if category.strip():
+        query = query.ilike("category", category.strip())
+
+    response = (
+        query
+        .order("occurred_on", desc=True)
+        .order("id", desc=True)
+        .limit(limit)
+        .execute()
+    )
+
+    rows = response.data
 
     return {
         "count": len(rows),
@@ -294,37 +346,30 @@ def summarize_transactions(
         start_date: Optional inclusive start date in YYYY-MM-DD format.
         end_date: Optional inclusive end date in YYYY-MM-DD format.
     """
-    conditions = []
-    params = []
-
     if start_date:
-        conditions.append("occurred_on >= ?")
-        params.append(validate_date(start_date))
+        start_date = validate_date(start_date)
 
     if end_date:
-        conditions.append("occurred_on <= ?")
-        params.append(validate_date(end_date))
+        end_date = validate_date(end_date)
 
     if start_date and end_date and start_date > end_date:
         raise ValueError("start_date cannot be after end_date.")
 
-    where_clause = (
-        "WHERE " + " AND ".join(conditions) if conditions else ""
+    user_id = get_current_user_id()
+
+    query = (
+        supabase.table("transactions")
+        .select("transaction_type, amount_paise")
+        .eq("user_id", user_id)
     )
 
-    with get_connection() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT
-                transaction_type,
-                SUM(amount_paise) AS total_paise,
-                COUNT(*) AS transaction_count
-            FROM transactions
-            {where_clause}
-            GROUP BY transaction_type
-            """,
-            params,
-        ).fetchall()
+    if start_date:
+        query = query.gte("occurred_on", start_date)
+
+    if end_date:
+        query = query.lte("occurred_on", end_date)
+
+    rows = query.execute().data
 
     totals = {
         "expense_paise": 0,
@@ -335,18 +380,18 @@ def summarize_transactions(
 
     for row in rows:
         if row["transaction_type"] == "expense":
-            totals["expense_paise"] = row["total_paise"] or 0
-            totals["expense_count"] = row["transaction_count"]
+            totals["expense_paise"] += row["amount_paise"]
+            totals["expense_count"] += 1
         else:
-            totals["income_paise"] = row["total_paise"] or 0
-            totals["income_count"] = row["transaction_count"]
+            totals["income_paise"] += row["amount_paise"]
+            totals["income_count"] += 1
 
     expense = totals["expense_paise"]
     income = totals["income_paise"]
 
     return {
-        "start_date": validate_date(start_date) if start_date else None,
-        "end_date": validate_date(end_date) if end_date else None,
+        "start_date": start_date if start_date else None,
+        "end_date": end_date if end_date else None,
         "total_expenses_rupees": f"{expense / 100:.2f}",
         "total_income_rupees": f"{income / 100:.2f}",
         "net_rupees": f"{(income - expense) / 100:.2f}",
@@ -355,18 +400,24 @@ def summarize_transactions(
     }
 
 
-
 @mcp.tool()
 def get_transaction(transaction_id: int) -> dict:
     """Retrieve one transaction using its unique ID."""
     if transaction_id < 1:
         raise ValueError("transaction_id must be a positive integer.")
 
-    with get_connection() as conn:
-        row = conn.execute(
-            "SELECT * FROM transactions WHERE id = ?",
-            (transaction_id,),
-        ).fetchone()
+    user_id = get_current_user_id()
+
+    response = (
+        supabase.table("transactions")
+        .select("*")
+        .eq("id", transaction_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+
+    row = response.data[0] if response.data else None
 
     if row is None:
         return {
@@ -378,7 +429,6 @@ def get_transaction(transaction_id: int) -> dict:
         "success": True,
         "transaction": format_transaction(row),
     }
-
 
 @mcp.tool()
 def update_transaction(
@@ -398,6 +448,8 @@ def update_transaction(
     """
     if transaction_id < 1:
         raise ValueError("transaction_id must be a positive integer.")
+
+    user_id = get_current_user_id()
 
     updates = {}
     if amount_rupees is not None:
@@ -421,11 +473,20 @@ def update_transaction(
         if transaction_type is not None:
             effective_type = transaction_type.strip().lower()
         else:
-            with get_connection() as conn:
-                existing_type = conn.execute(
-                    "SELECT transaction_type FROM transactions WHERE id = ?",
-                    (transaction_id,),
-                ).fetchone()
+            existing_response = (
+                supabase.table("transactions")
+                .select("transaction_type")
+                .eq("id", transaction_id)
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+
+            existing_type = (
+                existing_response.data[0]
+                if existing_response.data
+                else None
+            )
 
             if existing_type is None:
                 return {
@@ -450,33 +511,40 @@ def update_transaction(
     if not updates:
         raise ValueError("Provide at least one field to update.")
 
-    # Column names come only from the fixed dictionary above.
-    assignments = ", ".join(
-        f"{column} = ?" for column in updates
+    # Verify that the transaction belongs to the current user.
+    existing_response = (
+        supabase.table("transactions")
+        .select("id")
+        .eq("id", transaction_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
     )
-    values = list(updates.values()) + [transaction_id]
 
-    with get_connection() as conn:
-        existing = conn.execute(
-            "SELECT id FROM transactions WHERE id = ?",
-            (transaction_id,),
-        ).fetchone()
+    if not existing_response.data:
+        return {
+            "success": False,
+            "message": f"Transaction #{transaction_id} was not found.",
+        }
 
-        if existing is None:
-            return {
-                "success": False,
-                "message": f"Transaction #{transaction_id} was not found.",
-            }
+    # Update only the supplied fields.
+    supabase.table("transactions").update(updates).eq(
+        "id", transaction_id
+    ).eq(
+        "user_id", user_id
+    ).execute()
 
-        conn.execute(
-            f"UPDATE transactions SET {assignments} WHERE id = ?",
-            values,
-        )
+    # Retrieve the updated transaction.
+    response = (
+        supabase.table("transactions")
+        .select("*")
+        .eq("id", transaction_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
 
-        row = conn.execute(
-            "SELECT * FROM transactions WHERE id = ?",
-            (transaction_id,),
-        ).fetchone()
+    row = response.data[0]
 
     return {
         "success": True,
@@ -499,42 +567,49 @@ def delete_transaction(
     if transaction_id < 1:
         raise ValueError("transaction_id must be a positive integer.")
 
-    with get_connection() as conn:
-        row = conn.execute(
-            "SELECT * FROM transactions WHERE id = ?",
-            (transaction_id,),
-        ).fetchone()
+    user_id = get_current_user_id()
 
-        if row is None:
-            return {
-                "success": False,
-                "message": f"Transaction #{transaction_id} was not found.",
-            }
+    response = (
+        supabase.table("transactions")
+        .select("*")
+        .eq("id", transaction_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
 
-        transaction = format_transaction(row)
+    row = response.data[0] if response.data else None
 
-        if not confirm:
-            return {
-                "success": False,
-                "confirmation_required": True,
-                "message": (
-                    f"Confirm deletion of transaction #{transaction_id}. "
-                    "No changes have been made."
-                ),
-                "transaction": transaction,
-            }
+    if row is None:
+        return {
+            "success": False,
+            "message": f"Transaction #{transaction_id} was not found.",
+        }
 
-        conn.execute(
-            "DELETE FROM transactions WHERE id = ?",
-            (transaction_id,),
-        )
+    transaction = format_transaction(row)
+
+    if not confirm:
+        return {
+            "success": False,
+            "confirmation_required": True,
+            "message": (
+                f"Confirm deletion of transaction #{transaction_id}. "
+                "No changes have been made."
+            ),
+            "transaction": transaction,
+        }
+
+    supabase.table("transactions").delete().eq(
+        "id", transaction_id
+    ).eq(
+        "user_id", user_id
+    ).execute()
 
     return {
         "success": True,
         "message": f"Transaction #{transaction_id} deleted.",
         "deleted_transaction": transaction,
     }
-
 
 
 @mcp.tool()

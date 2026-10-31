@@ -98,8 +98,8 @@ DATE AND CALENDAR RULES:
 """
 
 
-async def create_expense_agent():
-    """Create the MCP client and the LangChain agent."""
+async def create_expense_agent(user_id: str):
+    """Create a user-specific MCP client and LangChain agent."""
 
     client = MultiServerMCPClient(
         {
@@ -107,13 +107,17 @@ async def create_expense_agent():
                 "transport": "stdio",
                 "command": "uv",
                 "args": ["run", "python", "server.py"],
+                "env": {
+                    **os.environ,
+                    "EXPENSE_USER_ID": user_id,
+                },
             }
         }
     )
 
     tools = await client.get_tools()
 
-    print("Tools discovered:")
+    print(f"Tools discovered for user: {user_id}")
     for tool in tools:
         print(f"- {tool.name}")
 

@@ -4,7 +4,20 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 
+from uuid import UUID
+from supabase import create_client, Client
+
 load_dotenv()
+SUPABASE_URL = os.getenv("SUPABASE_PROJECT_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SECRET_KEY")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError("Supabase environment variables are missing.")
+
+supabase: Client = create_client(
+    SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY,
+)
 
 # Persist vector data inside the project directory.
 MEMORY_DIR = Path(__file__).resolve().parent / "memory_store"
@@ -16,8 +29,8 @@ collection = client.get_or_create_collection(
     metadata={"hnsw:space": "cosine"},
 )
 
-
 def save_memory(
+    user_id: str,
     memory_id: str,
     text: str,
     category: str = "general",
@@ -31,14 +44,26 @@ def save_memory(
     if not text:
         raise ValueError("Memory text cannot be empty.")
 
-    collection.upsert(
-        ids=[memory_id],
-        documents=[text],
-        metadatas=[{"category": category}],
-    )
+    user_id = str(UUID(user_id))
 
+    embedding = collection._embedding_function([text])[0].tolist()
 
-def search_memories(query: str, limit: int = 3) -> list[dict]:
+    supabase.table("memories").upsert(
+        {
+            "user_id": user_id,
+            "memory_id": memory_id,
+            "content": text,
+            "category": category,
+            "embedding": embedding,
+        },
+        on_conflict="user_id,memory_id",
+    ).execute()
+
+def search_memories(
+    user_id: str,
+    query: str,
+    limit: int = 3,
+) -> list[dict]:
     """Find memories that are semantically relevant to a query."""
     query = query.strip()
 
@@ -48,19 +73,26 @@ def search_memories(query: str, limit: int = 3) -> list[dict]:
     if limit < 1:
         return []
 
-    results = collection.query(
-        query_texts=[query],
-        n_results=min(limit, max(collection.count(), 1)),
-        include=["documents", "metadatas", "distances"],
-    )
+    user_id = str(UUID(user_id))
+
+    query_embedding = collection._embedding_function([query])[0].tolist()
+
+    results = supabase.rpc(
+        "search_memories",
+        {
+            "query_embedding": query_embedding,
+            "match_user_id": user_id,
+            "match_count": limit,
+        },
+    ).execute()
 
     memories = []
 
-    for i, document in enumerate(results["documents"][0]):
+    for row in results.data:
         memories.append({
-            "text": document,
-            "category": results["metadatas"][0][i]["category"],
-            "distance": results["distances"][0][i],
+            "text": row["content"],
+            "category": row["category"],
+            "distance": row["distance"],
         })
 
     return memories
