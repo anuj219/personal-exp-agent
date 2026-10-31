@@ -9,7 +9,6 @@ from pydantic import BaseModel
 
 from agent import create_expense_agent, process_message
 
-import sqlite3
 from pathlib import Path
 from datetime import date
 
@@ -18,7 +17,6 @@ from langchain_core.messages import (
     AIMessage,
     SystemMessage,
 )
-from server import initialize_chat_history
 
 from memory import search_memories, extract_memories, save_memory
 
@@ -75,7 +73,6 @@ async def get_current_user(
             detail="Invalid or expired access token.",
         )
 
-db_path = Path(__file__).resolve().parent / "expenses.db"
 
 agents = {}
 agent_locks = {}
@@ -341,7 +338,7 @@ async def get_transactions(
         response = (
             supabase.table("transactions")
             .select(
-                "id, amount_paise, transaction_type, payment_method, "
+                "id, user_id, amount_paise, transaction_type, payment_method, "
                 "category, subcategory, note, occurred_on, created_at"
             )
             .eq("user_id", user_id)

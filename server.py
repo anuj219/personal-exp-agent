@@ -4,7 +4,6 @@ from zoneinfo import ZoneInfo
 import calendar
 
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-import sqlite3
 
 from mcp.server.fastmcp import FastMCP
 
@@ -15,7 +14,6 @@ from supabase import create_client, Client
 
 mcp = FastMCP("Personal Expense Agent")
 
-DB_PATH = "expenses.db"
 
 # ----------- SUPABASE CONFIGS -----------------------
 # Load environment variables from .env
@@ -111,44 +109,6 @@ def validate_category(transaction_type: str, category: str) -> str:
 
     return category
 
-
-def get_connection():
-    """Open a connection to the local SQLite database."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def initialize_database():
-    """Create the transactions table if it doesn't exist."""
-    with get_connection() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                amount_paise INTEGER NOT NULL CHECK (amount_paise > 0),
-                transaction_type TEXT NOT NULL
-                    CHECK (transaction_type IN ('expense', 'income')),
-                payment_method TEXT NOT NULL
-                    CHECK (payment_method IN ('cash', 'upi', 'card', 'bank', 'other')),
-                category TEXT NOT NULL,
-                subcategory TEXT NOT NULL DEFAULT '',
-                note TEXT NOT NULL DEFAULT '',
-                occurred_on TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-def initialize_chat_history():
-    with get_connection() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                role TEXT NOT NULL
-                    CHECK (role IN ('user', 'assistant')),
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
 
 
 def rupees_to_paise(amount_rupees: float) -> int:
@@ -654,9 +614,6 @@ def get_date_context() -> dict:
         "current_year": today.year,
     }
 
-
-initialize_database()
-initialize_chat_history()
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
