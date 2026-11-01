@@ -22,7 +22,7 @@ from memory import search_memories, extract_memories, save_memory
 
 import os
 from dotenv import load_dotenv
-from gotrue.errors import AuthApiError
+from supabase_auth.errors import AuthApiError
 from supabase import create_client, Client
 load_dotenv()
 
