@@ -51,6 +51,7 @@ supabase: Client = create_client(
 security = HTTPBearer()
 
 
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> str:
@@ -67,11 +68,22 @@ async def get_current_user(
 
         return str(response.user.id)
 
-    except AuthApiError:
+    except HTTPException:
+        raise
+
+    except AuthApiError as e:
+        print(f"Supabase authentication rejected token: {e}")
         raise HTTPException(
             status_code=401,
             detail="Invalid or expired access token.",
-        )
+        ) from e
+
+    except Exception as e:
+        print(f"Unexpected authentication error: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication service temporarily unavailable.",
+        ) from e
 
 
 agents = {}
@@ -323,6 +335,7 @@ async def get_chat_history(
         ) from exc
 
 
+
 @app.get("/transactions")
 async def get_transactions(
     limit: int = 100,
@@ -335,7 +348,8 @@ async def get_transactions(
         )
 
     try:
-        response = (
+        # Fetch the latest transactions for display.
+        transactions_response = (
             supabase.table("transactions")
             .select(
                 "id, user_id, amount_paise, transaction_type, payment_method, "
@@ -348,13 +362,42 @@ async def get_transactions(
             .execute()
         )
 
-        return {"transactions": response.data}
+        # Fetch all transactions for an accurate balance.
+        totals_response = (
+            supabase.table("transactions")
+            .select("amount_paise, transaction_type")
+            .eq("user_id", user_id)
+            .execute()
+        )
+
+        total_income = 0
+        total_expense = 0
+
+        for transaction in totals_response.data:
+            amount = int(transaction["amount_paise"])
+
+            if transaction["transaction_type"] == "income":
+                total_income += amount
+            else:
+                total_expense += amount
+
+        net_balance = total_income - total_expense
+
+        return {
+            "transactions": transactions_response.data,
+            "summary": {
+                "total_income_paise": total_income,
+                "total_expense_paise": total_expense,
+                "net_balance_paise": net_balance,
+            }
+        }
 
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail=f"Could not read transactions: {exc}"
         ) from exc
+
 
 class TransactionCreateRequest(BaseModel):
     amount_paise: int

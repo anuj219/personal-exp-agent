@@ -12,7 +12,7 @@ supabase = create_client(
     os.getenv("SUPABASE_SECRET_KEY")
 )
 
-username = "anujmehta"
+username = "vedantshah"
 
 if not re.fullmatch(r"[a-z0-9_]{3,30}", username):
     raise ValueError("Invalid username")
