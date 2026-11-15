@@ -1,5 +1,5 @@
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import calendar
 
@@ -131,14 +131,15 @@ def rupees_to_paise(amount_rupees: float) -> int:
 
 
 def validate_date(value: str) -> str:
-    """Use today's date when omitted; otherwise require YYYY-MM-DD."""
+    """Use current server timestamp with time when omitted; otherwise validate format."""
     if not value:
-        return date.today().isoformat()
+        # Automatically captures the exact date and time on the server when processed
+        return datetime.now(timezone.utc).isoformat()
 
     try:
-        return date.fromisoformat(value).isoformat()
+        return datetime.fromisoformat(value).isoformat()
     except ValueError:
-        raise ValueError("Date must use YYYY-MM-DD format.")
+        raise ValueError("Timestamp must be in valid ISO format.")
 
 
 def format_transaction(row):
