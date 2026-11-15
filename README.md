@@ -1411,3 +1411,4 @@ USER
 **The central design principle:** The LLM decides what operation should happen, the MCP tools perform the operation, and Supabase stores the actual data.
 
 That separation is what makes the project extensible. You can add new capabilities without rebuilding the entire application.
+       

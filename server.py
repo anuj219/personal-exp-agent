@@ -75,6 +75,7 @@ INCOME_CATEGORIES = [
     "Investments",
     "Gifts",
     "Other Income",
+    "Other",
 ]
 
 PAYMENT_METHODS = [
