@@ -24,7 +24,7 @@ from memory import search_memories, extract_memories, save_memory
 import os
 from dotenv import load_dotenv
 from supabase_auth.errors import AuthApiError
-from supabase import AuthClientOptions, create_client
+from supabase import create_client, Client
 
 load_dotenv()
 
@@ -40,10 +40,9 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     raise RuntimeError("Supabase authentication environment variables are missing.")
 
-auth_supabase = create_client(
+auth_supabase: Client = create_client(
     SUPABASE_URL,
     SUPABASE_ANON_KEY,
-    auth=AuthClientOptions(auto_refresh_token=False),
 )
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SECRET_KEY")
 
