@@ -1,5 +1,6 @@
 import re
 import asyncio
+import httpx
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends
@@ -23,7 +24,8 @@ from memory import search_memories, extract_memories, save_memory
 import os
 from dotenv import load_dotenv
 from supabase_auth.errors import AuthApiError
-from supabase import create_client, Client
+from supabase import AuthClientOptions, create_client
+
 load_dotenv()
 
 from zoneinfo import ZoneInfo
@@ -38,9 +40,10 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     raise RuntimeError("Supabase authentication environment variables are missing.")
 
-auth_supabase: Client = create_client(
+auth_supabase = create_client(
     SUPABASE_URL,
     SUPABASE_ANON_KEY,
+    auth=AuthClientOptions(auto_refresh_token=False),
 )
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SECRET_KEY")
 
@@ -131,32 +134,44 @@ async def login(request: LoginRequest):
     email = f"{username}@expense-agent.example.com"
 
     try:
-        response = auth_supabase.auth.sign_in_with_password({
-            "email": email,
-            "password": request.password,
-        })
+        # Use a stateless HTTP call to Supabase directly.
+        # DO NOT call auth_supabase.auth.sign_in_with_password(), because storing
+        # the session inside the shared auth_supabase singleton causes:
+        # 1. State collisions between different users (you and your friend).
+        # 2. Gotrue background auto-refreshing the token on Render, revoking the client's
+        #    refresh token and triggering "refresh_token_already_used".
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
+                headers={
+                    "apikey": SUPABASE_ANON_KEY,
+                    "Content-Type": "application/json",
+                },
+                json={"email": email, "password": request.password},
+            )
 
-        session = response.session
-        user = response.user
-
-        if not session or not user:
+        if resp.status_code != 200:
             raise HTTPException(
                 status_code=401,
                 detail="Invalid username or password.",
             )
 
+        data = resp.json()
         return {
-            "access_token": session.access_token,
-            "refresh_token": session.refresh_token,
-            "token_type": "bearer",
-            "expires_in": session.expires_in,
-            "user_id": user.id,
+            "access_token": data["access_token"],
+            "refresh_token": data["refresh_token"],
+            "token_type": data.get("token_type", "bearer"),
+            "expires_in": data.get("expires_in", 3600),
+            "user_id": data["user"]["id"],
         }
 
-    except AuthApiError:
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Login error: {type(e).__name__}: {e}")
         raise HTTPException(
-            status_code=401,
-            detail="Invalid username or password.",
+            status_code=500,
+            detail="Authentication service error.",
         )
 
 @app.get("/auth/me")
